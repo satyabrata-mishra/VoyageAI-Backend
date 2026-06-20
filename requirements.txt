@@ -1,0 +1,13 @@
+langchain
+langchain-text-splitters
+langchain-chroma
+langchain-huggingface 
+langchain-community
+langchain-groq
+
+ipykernel
+dotenv
+tqdm
+sentence-transformers
+faiss-cpu
+chromadb  
