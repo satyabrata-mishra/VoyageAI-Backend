@@ -1,13 +1,16 @@
 langchain
-langchain-text-splitters
-langchain-chroma
-langchain-huggingface 
-langchain-community
+langchain-core
 langchain-groq
+langchain-huggingface
+langchain-chroma
+langgraph
 
-ipykernel
-dotenv
-tqdm
+chromadb
 sentence-transformers
-faiss-cpu
-chromadb  
+
+python-dotenv
+pydantic
+pydantic-settings
+
+fastapi
+uvicorn
