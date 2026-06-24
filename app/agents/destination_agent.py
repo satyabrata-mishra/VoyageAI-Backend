@@ -1,181 +1,326 @@
+import os
+import json
+
+from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 
-from app.config.settings import settings
-from app.rag.vector_store import get_vector_store
-from app.rag.retriever import get_retrieval_context
-from app.utils.destination_utils import (
-    get_available_destinations,
-    is_destination_in_kb,
-    format_available_destinations,
+from app.tools.destination_tool import (
+    search_destination,
+    get_top_attractions
 )
-from app.utils.json_utils import parse_json_response
+
+# Existing RAG utilities
+from app.rag.retriever import get_retrieval_context
+from app.rag.rag_chain import rag_chain
+
+load_dotenv()
 
 
-DESTINATION_AGENT_PROMPT = ChatPromptTemplate.from_template("""
-You are the Destination Agent of VoyageAI.
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0.2,
+    api_key=os.getenv("GROQ_API_KEY")
+)
 
-Your task is to recommend the best destination based only on the available VoyageAI knowledge base.
 
-Available destinations in the knowledge base:
-{available_destinations}
+# =====================================================
+# Extract destination if explicitly mentioned
+# =====================================================
 
-User Travel Request:
+def extract_destination_from_query(user_query: str):
+    """
+    Returns:
+    Destination name
+    OR
+    NONE
+    """
+
+    prompt = f"""
+You are a destination extraction system.
+
+User Query:
 {user_query}
 
-Retrieved Travel Knowledge:
-{context}
-
-Return your answer strictly in valid JSON format.
-
-JSON structure:
-{{
-  "agent_name": "Destination Agent",
-  "status": "success/out_of_knowledge_base",
-  "recommended_destination": "destination name or null",
-  "reason": "short reason",
-  "suitable_for": ["type 1", "type 2", "type 3"],
-  "suggested_duration": "duration from retrieved knowledge or null",
-  "best_time_to_visit": "best time from retrieved knowledge or null",
-  "key_attractions": ["attraction 1", "attraction 2", "attraction 3"],
-  "confidence": "high/medium/low"
-}}
-
 Rules:
-- You are allowed to recommend ONLY destinations from the available destinations list.
-- Do not use your general knowledge.
-- Do not invent destinations outside the available destinations list.
-- If the user explicitly asks for a destination that is not in the available destinations list, set status to "out_of_knowledge_base".
-- If status is "out_of_knowledge_base", set recommended_destination to null.
-- If the retrieved knowledge does not support the answer, set confidence to "low".
-- Do not add markdown.
-- Do not wrap JSON in ```json.
-""")
+- If user explicitly mentions a city, state, country or destination,
+  return only that destination name.
+- If no destination is mentioned,
+  return NONE.
+
+Examples:
+
+I want to visit Venice
+Venice
+
+Plan a Goa trip
+Goa
+
+I want beaches and seafood
+NONE
+
+Return only the answer.
+"""
+
+    response = llm.invoke(prompt)
+
+    return response.content.strip()
 
 
-class DestinationAgent:
-    def __init__(self):
-        self.vector_store = get_vector_store()
+# =====================================================
+# Enrich destination using OpenTripMap
+# =====================================================
 
-        self.available_destinations = get_available_destinations(
-            self.vector_store
+def enrich_destination(destination_name):
+
+    destination_data = search_destination(
+        destination_name
+    )
+
+    if not destination_data["success"]:
+        return None
+
+    attractions = get_top_attractions(
+        destination_data["latitude"],
+        destination_data["longitude"]
+    )
+
+    return {
+        "destination_data": destination_data,
+        "attractions": attractions
+    }
+
+
+# =====================================================
+# Generate destination analysis
+# =====================================================
+
+def generate_destination_analysis(
+    user_query,
+    destination_data,
+    attractions
+):
+
+    prompt = f"""
+You are an expert travel planner.
+
+User Query:
+{user_query}
+
+Destination Information:
+{json.dumps(destination_data, indent=2)}
+
+Top Attractions:
+{json.dumps(attractions[:10], indent=2)}
+
+Generate travel insights.
+
+Return valid JSON with:
+
+{{
+    "reason": "...",
+    "destination_type": [...],
+    "suitable_for": [...],
+    "suggested_duration": "...",
+    "best_time_to_visit": "..."
+}}
+"""
+
+    response = llm.invoke(prompt)
+
+    content = response.content.strip()
+
+    if "```json" in content:
+        content = content.replace("```json", "")
+        content = content.replace("```", "").strip()
+
+    return json.loads(content)
+
+
+# =====================================================
+# Main Agent
+# =====================================================
+
+def run_destination_agent(user_query):
+
+    try:
+
+        # -------------------------------------------------
+        # STEP 1
+        # Check explicit destination
+        # -------------------------------------------------
+
+        explicit_destination = extract_destination_from_query(
+            user_query
         )
 
-        if not settings.GROQ_API_KEY:
-            raise ValueError(
-                "GROQ_API_KEY not found. Please check your .env file."
+        # -------------------------------------------------
+        # CASE A
+        # User explicitly provided destination
+        # -------------------------------------------------
+
+        if explicit_destination.upper() != "NONE":
+
+            enriched = enrich_destination(
+                explicit_destination
             )
 
-        self.llm = ChatGroq(
-            model=settings.GROQ_MODEL_NAME,
-            temperature=0.2,
-            groq_api_key=settings.GROQ_API_KEY,
-        )
+            if not enriched:
 
-        self.chain = (
-            DESTINATION_AGENT_PROMPT
-            | self.llm
-            | StrOutputParser()
-        )
+                return {
+                    "agent_name": "Destination Agent",
+                    "status": "failed",
+                    "error": f"Could not find destination: {explicit_destination}"
+                }
 
-    def run(self, user_query: str, k: int = 3) -> dict:
+            destination_data = enriched["destination_data"]
+            attractions = enriched["attractions"]
+
+            analysis = generate_destination_analysis(
+                user_query=user_query,
+                destination_data=destination_data,
+                attractions=attractions
+            )
+
+            return {
+                "agent_name": "Destination Agent",
+                "status": "success",
+
+                "recommended_destination":
+                    destination_data["name"],
+
+                "country":
+                    destination_data["country"],
+
+                "coordinates": {
+                    "latitude":
+                        destination_data["latitude"],
+                    "longitude":
+                        destination_data["longitude"]
+                },
+
+                "key_attractions": [
+                    attraction["name"]
+                    for attraction in attractions[:10]
+                ],
+
+                **analysis,
+
+                "confidence": "high"
+            }
+
+        # -------------------------------------------------
+        # CASE B
+        # No destination mentioned
+        # Use existing RAG workflow
+        # -------------------------------------------------
+
         context = get_retrieval_context(
             query=user_query,
-            k=k,
-            vector_store=self.vector_store,
+            k=3
         )
 
-        response = self.chain.invoke(
+        rag_response = rag_chain.invoke(
             {
                 "user_query": user_query,
-                "context": context,
-                "available_destinations": format_available_destinations(
-                    self.available_destinations
-                ),
+                "context": context
             }
         )
 
-        try:
-            parsed_response = parse_json_response(response)
-        except Exception:
-            return {
-                "agent_name": "Destination Agent",
-                "status": "error",
-                "recommended_destination": None,
-                "reason": "Failed to parse agent response.",
-                "suitable_for": [],
-                "suggested_duration": None,
-                "best_time_to_visit": None,
-                "key_attractions": [],
-                "confidence": "low",
-                "raw_response": response,
-            }
+        # -------------------------------------------------
+        # Extract destination from RAG output
+        # -------------------------------------------------
 
-        recommended_destination = parsed_response.get(
-            "recommended_destination"
+        extraction_prompt = f"""
+Extract ONLY the recommended destination.
+
+Response:
+
+{rag_response}
+
+Return only destination name.
+"""
+
+        destination_name = (
+            llm.invoke(extraction_prompt)
+            .content
+            .strip()
         )
 
-        if recommended_destination and not is_destination_in_kb(
-            recommended_destination,
-            self.available_destinations,
-        ):
+        enriched = enrich_destination(
+            destination_name
+        )
+
+        if not enriched:
+
             return {
                 "agent_name": "Destination Agent",
-                "status": "out_of_knowledge_base",
-                "recommended_destination": None,
-                "reason": (
-                    f"{recommended_destination} is not available in the "
-                    "current VoyageAI knowledge base."
-                ),
-                "suitable_for": [],
-                "suggested_duration": None,
-                "best_time_to_visit": None,
-                "key_attractions": [],
-                "available_destinations": self.available_destinations,
-                "confidence": "low",
+                "status": "failed",
+                "error": f"Could not enrich destination: {destination_name}"
             }
 
-        return parsed_response
+        destination_data = enriched["destination_data"]
+        attractions = enriched["attractions"]
+
+        analysis = generate_destination_analysis(
+            user_query=user_query,
+            destination_data=destination_data,
+            attractions=attractions
+        )
+
+        return {
+            "agent_name": "Destination Agent",
+            "status": "success",
+
+            "recommended_destination":
+                destination_data["name"],
+
+            "country":
+                destination_data["country"],
+
+            "coordinates": {
+                "latitude":
+                    destination_data["latitude"],
+                "longitude":
+                    destination_data["longitude"]
+            },
+
+            "key_attractions": [
+                attraction["name"]
+                for attraction in attractions[:10]
+            ],
+
+            **analysis,
+
+            "confidence": "high"
+        }
+
+    except Exception as e:
+
+        return {
+            "agent_name": "Destination Agent",
+            "status": "failed",
+            "error": str(e)
+        }
 
 
-def run_destination_agent(user_query: str, k: int = 3) -> dict:
-    agent = DestinationAgent()
-    return agent.run(user_query=user_query, k=k)
+# =====================================================
+# Local Testing
+# =====================================================
 
 if __name__ == "__main__":
-    import json
 
-    test_queries = [
-        {
-            "name": "Adventure beach trip",
-            "query": "I want to do scuba diving, island hopping and enjoy clean beaches",
-            "k": 3,
-        },
-        {
-            "name": "Romantic luxury trip",
-            "query": "I want a romantic luxury trip with lakes and palaces",
-            "k": 3,
-        },
-        {
-            "name": "Out of knowledge base destination",
-            "query": "I want to visit Venice for canals and Italian food",
-            "k": 3,
-        },
-    ]
+    print("\n===== TEST 1 =====\n")
 
-    destination_agent = DestinationAgent()
+    result = run_destination_agent(
+        "I want to visit Venice"
+    )
 
-    for test_case in test_queries:
-        print("=" * 100)
-        print("Test Case:", test_case["name"])
-        print("User Query:", test_case["query"])
-        print("-" * 100)
+    print(json.dumps(result, indent=2))
 
-        result = destination_agent.run(
-            user_query=test_case["query"],
-            k=test_case["k"],
-        )
+    print("\n===== TEST 2 =====\n")
 
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        print()
+    result = run_destination_agent(
+        "I want beaches, seafood and nightlife"
+    )
+
+    print(json.dumps(result, indent=2))

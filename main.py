@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import os
 
 from app.api.health import router as health_router
 from app.api.travel import router as travel_router
@@ -11,13 +12,16 @@ app = FastAPI(
     version="1.0.0"
 )
 
+_default_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+_extra_origins = os.getenv("CORS_ORIGINS", "")
+_cors_origins = _default_origins + [o.strip() for o in _extra_origins.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173"
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

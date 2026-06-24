@@ -14,3 +14,4 @@ pydantic-settings
 
 fastapi
 uvicorn
+requests
