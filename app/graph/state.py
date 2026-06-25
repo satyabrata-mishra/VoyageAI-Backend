@@ -5,6 +5,7 @@ class VoyageAIState(TypedDict, total=False):
     user_query: str
 
     destination_result: Optional[Dict[str, Any]]
+    attraction_result: Optional[dict]
     hotel_result: Optional[Dict[str, Any]]
     food_result: Optional[Dict[str, Any]]
     transport_result: Optional[Dict[str, Any]]

@@ -1,5 +1,7 @@
 import os
 import json
+import traceback
+from urllib import response
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -22,6 +24,41 @@ llm = ChatGroq(
     api_key=os.getenv("GROQ_API_KEY")
 )
 
+import re
+import json
+
+
+def safe_json_parse(content: str):
+
+    content = content.strip()
+
+    if "```json" in content:
+        content = (
+            content
+            .replace("```json", "")
+            .replace("```", "")
+            .strip()
+        )
+
+    try:
+        return json.loads(content)
+
+    except Exception:
+
+        match = re.search(
+            r"\{.*\}",
+            content,
+            re.DOTALL
+        )
+
+        if not match:
+            raise ValueError(
+                f"Could not extract JSON.\n\n{content}"
+            )
+
+        return json.loads(
+            match.group()
+        )
 
 # =====================================================
 # Extract destination if explicitly mentioned
@@ -62,7 +99,6 @@ Return only the answer.
 """
 
     response = llm.invoke(prompt)
-
     return response.content.strip()
 
 
@@ -110,16 +146,20 @@ Destination Information:
 {json.dumps(destination_data, indent=2)}
 
 Top Attractions:
-{json.dumps(attractions[:10], indent=2)}
+{json.dumps(attractions[:5], indent=2)}
 
-Generate travel insights.
+Respond ONLY with valid JSON.
 
-Return valid JSON with:
+Do not use markdown.
+Do not use code blocks.
+Do not add explanations before or after JSON.
+
+Schema:
 
 {{
     "reason": "...",
-    "destination_type": [...],
-    "suitable_for": [...],
+    "destination_type": [],
+    "suitable_for": [],
     "suggested_duration": "...",
     "best_time_to_visit": "..."
 }}
@@ -129,11 +169,7 @@ Return valid JSON with:
 
     content = response.content.strip()
 
-    if "```json" in content:
-        content = content.replace("```json", "")
-        content = content.replace("```", "").strip()
-
-    return json.loads(content)
+    return safe_json_parse(content)
 
 
 # =====================================================
@@ -200,7 +236,7 @@ def run_destination_agent(user_query):
 
                 "key_attractions": [
                     attraction["name"]
-                    for attraction in attractions[:10]
+                    for attraction in attractions[:5]
                 ],
 
                 **analysis,
@@ -295,7 +331,7 @@ Return only destination name.
         }
 
     except Exception as e:
-
+        traceback.print_exc()
         return {
             "agent_name": "Destination Agent",
             "status": "failed",
@@ -311,16 +347,5 @@ if __name__ == "__main__":
 
     print("\n===== TEST 1 =====\n")
 
-    result = run_destination_agent(
-        "I want to visit Venice"
-    )
-
-    print(json.dumps(result, indent=2))
-
-    print("\n===== TEST 2 =====\n")
-
-    result = run_destination_agent(
-        "I want beaches, seafood and nightlife"
-    )
-
+    result = run_destination_agent("I want a 4 day Goa trip from Bhubaneswar under 20000 with beaches, seafood and nightlife. Keep it low budget.")
     print(json.dumps(result, indent=2))

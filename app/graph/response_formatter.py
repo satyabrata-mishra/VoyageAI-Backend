@@ -1,5 +1,6 @@
 def format_graph_response(final_state: dict):
     destination_result = final_state.get("destination_result", {})
+    attraction_result = final_state.get("attraction_result", {})
     hotel_result = final_state.get("hotel_result", {})
     food_result = final_state.get("food_result", {})
     transport_result = final_state.get("transport_result", {})
@@ -26,6 +27,7 @@ def format_graph_response(final_state: dict):
         "revision_notes": final_state.get("revision_notes", []),
         "agent_outputs": {
             "destination": destination_result,
+            "attraction": attraction_result,
             "hotel": hotel_result,
             "food": food_result,
             "transport": transport_result,

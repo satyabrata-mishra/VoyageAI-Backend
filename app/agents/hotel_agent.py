@@ -1,363 +1,550 @@
+import os
 import json
-from typing import Any
 
+from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 
-from app.config.settings import settings
-from app.rag.vector_store import get_vector_store
-from app.utils.destination_utils import (
-    get_available_destinations,
-    is_destination_in_kb,
-    normalize_destination_to_key,
+from app.tools.hotel_tool import search_hotels
+
+load_dotenv()
+
+
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0.2,
+    api_key=os.getenv("GROQ_API_KEY")
 )
-from app.utils.json_utils import parse_json_response
+
+def safe_str(value):
+    """
+    Convert None to empty string and strip whitespace.
+    """
+    return str(value or "").strip()
 
 
-HOTEL_AGENT_PROMPT = ChatPromptTemplate.from_template("""
-You are the Hotel Agent of VoyageAI.
+def safe_lower(value):
+    """
+    Safe lowercase conversion.
+    """
+    return safe_str(value).lower()
 
-Your task is to suggest the best stay type for the user based on:
-1. User travel request
-2. Destination Agent output
-3. Retrieved travel knowledge
+# =====================================================
+# Budget Detection
+# =====================================================
 
-User Travel Request:
+def detect_budget_level(user_query):
+
+    query = user_query.lower()
+
+    if any(word in query for word in [
+        "budget",
+        "cheap",
+        "low budget",
+        "affordable",
+        "hostel"
+    ]):
+        return "budget"
+
+    if any(word in query for word in [
+        "luxury",
+        "premium",
+        "5 star",
+        "resort"
+    ]):
+        return "luxury"
+
+    return "comfort"
+
+
+# =====================================================
+# Traveler Type Detection
+# =====================================================
+
+def detect_traveler_type(user_query):
+
+    query = user_query.lower()
+
+    if any(word in query for word in [
+        "family",
+        "kids",
+        "children"
+    ]):
+        return "family"
+
+    if any(word in query for word in [
+        "honeymoon",
+        "couple",
+        "romantic"
+    ]):
+        return "couple"
+
+    if any(word in query for word in [
+        "business",
+        "office",
+        "work"
+    ]):
+        return "business"
+
+    return "solo"
+
+
+# =====================================================
+# Travel Preferences
+# =====================================================
+
+def detect_preferences(user_query):
+
+    query = user_query.lower()
+
+    preferences = []
+
+    mapping = {
+        "beach": ["beach", "sea", "coast"],
+        "nightlife": ["nightlife", "party", "club"],
+        "food": ["food", "restaurant", "seafood"],
+        "history": ["history", "heritage", "culture"],
+        "nature": ["nature", "mountain", "waterfall"],
+        "shopping": ["shopping", "market"]
+    }
+
+    for category, keywords in mapping.items():
+
+        if any(
+            keyword in query
+            for keyword in keywords
+        ):
+            preferences.append(category)
+
+    return preferences
+
+
+# =====================================================
+# Hotel Ranking
+# =====================================================
+
+def rank_hotels(
+    user_query,
+    destination,
+    hotels,
+    budget_level,
+    traveler_type,
+    preferences
+):
+
+    prompt = f"""
+You are an expert travel hotel advisor.
+
+User Query:
 {user_query}
 
-Destination Agent Output:
-{destination_result}
+Destination:
+{destination}
 
-Retrieved Travel Knowledge:
-{context}
+Budget Level:
+{budget_level}
 
-Return your answer strictly in valid JSON format.
+Traveler Type:
+{traveler_type}
 
-JSON structure:
+Traveler Preferences:
+{preferences}
+
+Available Hotels:
+{json.dumps(hotels[:25], indent=2)}
+
+Select:
+
+1. Top 3 recommended hotels.
+2. Reason for each hotel.
+3. Recommended area.
+4. 3 alternative hotels.
+
+Return ONLY valid JSON.
+
 {{
-  "agent_name": "Hotel Agent",
-  "destination": "destination name",
-  "budget_preference": "budget/comfort/luxury/unknown",
-  "recommended_stay_type": "short recommendation",
-  "best_areas": ["area 1", "area 2", "area 3"],
-  "stay_options": {{
-    "budget": "budget stay suggestion",
-    "comfort": "comfort stay suggestion",
-    "luxury": "luxury stay suggestion"
-  }},
-  "reason": "why this stay recommendation matches the user",
-  "hotel_booking_tip": "practical booking tip",
-  "confidence": "high/medium/low"
+  "recommended_area": "...",
+
+  "top_recommended_hotels": [
+    {{
+      "hotel_name": "...",
+      "reason": "..."
+    }},
+    {{
+      "hotel_name": "...",
+      "reason": "..."
+    }},
+    {{
+      "hotel_name": "...",
+      "reason": "..."
+    }}
+  ],
+
+  "alternative_hotels": [
+    "...",
+    "...",
+    "..."
+  ]
 }}
-
-Rules:
-- Use only the retrieved travel knowledge.
-- Do not invent exact hotel names.
-- Do not invent exact prices.
-- Suggest stay categories and areas only.
-- If the user's budget is not mentioned, set budget_preference to "unknown".
-- Do not add markdown.
-- Do not wrap JSON in ```json.
-""")
-
-
-class HotelAgent:
-    def __init__(self):
-        self.vector_store = get_vector_store()
-
-        self.available_destinations = get_available_destinations(
-            self.vector_store
-        )
-
-        if not settings.GROQ_API_KEY:
-            raise ValueError(
-                "GROQ_API_KEY not found. Please check your .env file."
-            )
-
-        self.llm = ChatGroq(
-            model=settings.GROQ_MODEL_NAME,
-            temperature=0.2,
-            groq_api_key=settings.GROQ_API_KEY,
-        )
-
-        self.chain = HOTEL_AGENT_PROMPT | self.llm | StrOutputParser()
-
-    def get_hotel_context(
-        self,
-        user_query: str,
-        destination_result: dict[str, Any],
-        k: int = 4,
-    ) -> str:
-        destination = destination_result.get("recommended_destination")
-        city_key = normalize_destination_to_key(destination)
-
-        retrieval_query = f"""
-Destination: {destination}
-User request: {user_query}
-Need hotel stay suggestions, budget stay, comfort stay, luxury stay, best areas, accommodation tips.
 """
 
-        try:
-            docs = self.vector_store.similarity_search(
-                retrieval_query,
-                k=k,
-                filter={"city": city_key},
-            )
+    response = llm.invoke(prompt)
 
-            if not docs:
-                docs = self.vector_store.similarity_search(
-                    retrieval_query,
-                    k=k,
-                )
+    content = response.content.strip()
 
-        except Exception as error:
-            print("Filter search failed. Running normal similarity search.")
-            print("Error:", error)
-
-            docs = self.vector_store.similarity_search(
-                retrieval_query,
-                k=k,
-            )
-
-        context_parts = []
-
-        for index, doc in enumerate(docs, start=1):
-            city = doc.metadata.get("city")
-            source = doc.metadata.get("source")
-
-            context = f"""
-Context {index}
-City: {city}
-Source: {source}
-Content:
-{doc.page_content}
-"""
-            context_parts.append(context.strip())
-
-        return "\n\n".join(context_parts)
-
-    def run(
-        self,
-        user_query: str,
-        destination_result: dict[str, Any],
-        k: int = 4,
-    ) -> dict[str, Any]:
-        destination_status = destination_result.get("status")
-        destination = destination_result.get("recommended_destination")
-
-        if destination_status and destination_status != "success":
-            return {
-                "agent_name": "Hotel Agent",
-                "status": "skipped",
-                "destination": None,
-                "message": (
-                    "Hotel Agent skipped because Destination Agent did not "
-                    "return a valid destination."
-                ),
-                "reason": destination_result.get("reason"),
-                "confidence": "low",
-            }
-
-        if not destination:
-            return {
-                "agent_name": "Hotel Agent",
-                "status": "no_destination_found",
-                "destination": None,
-                "message": (
-                    "Hotel Agent cannot run because no destination was provided."
-                ),
-                "confidence": "low",
-            }
-
-        if not is_destination_in_kb(
-            destination,
-            self.available_destinations,
-        ):
-            return {
-                "agent_name": "Hotel Agent",
-                "status": "out_of_knowledge_base",
-                "destination": destination,
-                "message": (
-                    f"{destination} is not available in the current "
-                    "VoyageAI knowledge base."
-                ),
-                "available_destinations": self.available_destinations,
-                "confidence": "low",
-            }
-
-        context = self.get_hotel_context(
-            user_query=user_query,
-            destination_result=destination_result,
-            k=k,
+    if "```json" in content:
+        content = (
+            content
+            .replace("```json", "")
+            .replace("```", "")
+            .strip()
         )
 
-        response = self.chain.invoke(
-            {
-                "user_query": user_query,
-                "destination_result": json.dumps(
-                    destination_result,
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                "context": context,
-            }
-        )
+    try:
+        return json.loads(content)
 
-        try:
-            parsed_response = parse_json_response(response)
-        except Exception:
-            return {
-                "agent_name": "Hotel Agent",
-                "status": "error",
-                "destination": destination,
-                "message": "Failed to parse Hotel Agent response.",
-                "confidence": "low",
-                "raw_response": response,
-            }
+    except Exception:
 
-        parsed_response["status"] = parsed_response.get("status", "success")
+        print("Failed JSON:")
+        print(content)
 
-        return parsed_response
+        return {
+            "recommended_area": destination,
+            "top_recommended_hotels": [],
+            "alternative_hotels": []
+        }
 
+def find_hotel_by_name(
+    hotel_name,
+    hotels
+):
+
+    hotel_name = safe_lower(hotel_name)
+
+    if not hotel_name:
+        return None
+
+    for hotel in hotels:
+
+        if (safe_lower(hotel.get("name"))==hotel_name):
+            return hotel
+
+    return None
+
+# =====================================================
+# Main Agent
+# =====================================================
 
 def run_hotel_agent(
-    user_query: str,
-    destination_result: dict[str, Any],
-    k: int = 4,
-) -> dict[str, Any]:
-    agent = HotelAgent()
+    user_query,
+    destination_result
+):
 
-    return agent.run(
-        user_query=user_query,
-        destination_result=destination_result,
-        k=k,
-    )
+    try:
 
-
-if __name__ == "__main__":
-    import json
-
-    test_cases = [
-        {
-            "name": "Luxury romantic Udaipur trip",
-            "user_query": "I want a romantic luxury trip with lakes and palaces",
-            "destination_result": {
-                "agent_name": "Destination Agent",
-                "status": "success",
-                "recommended_destination": "udaipur",
-                "reason": "Udaipur matches lakes, palaces and romantic luxury travel.",
-                "suitable_for": ["romantic", "luxury", "couples"],
-                "suggested_duration": "4-5 days",
-                "best_time_to_visit": "October to March",
-                "key_attractions": ["City Palace", "Lake Pichola", "Jag Mandir"],
-                "confidence": "high",
-            },
-        },
-        {
-            "name": "Low budget Goa beach trip",
-            "user_query": "I want beaches, seafood, nightlife and a relaxed vacation. My budget is low.",
-            "destination_result": {
-                "agent_name": "Destination Agent",
-                "status": "success",
-                "recommended_destination": "Goa",
-                "reason": "Goa matches beaches, seafood, nightlife and relaxed coastal travel.",
-                "suitable_for": ["beach lovers", "food lovers", "nightlife travelers"],
-                "suggested_duration": "3 to 5 days",
-                "best_time_to_visit": "November to February",
-                "key_attractions": ["Baga Beach", "Anjuna Beach", "Fort Aguada"],
-                "confidence": "high",
-            },
-        },
-        {
-            "name": "Comfort Jaipur culture trip",
-            "user_query": "I want forts, palaces, royal culture and traditional food. I prefer a comfortable stay.",
-            "destination_result": {
-                "agent_name": "Destination Agent",
-                "status": "success",
-                "recommended_destination": "Jaipur",
-                "reason": "Jaipur matches forts, palaces, royal culture and traditional food.",
-                "suitable_for": ["history lovers", "culture lovers", "families"],
-                "suggested_duration": "2 to 4 days",
-                "best_time_to_visit": "October to March",
-                "key_attractions": ["Amber Fort", "City Palace", "Hawa Mahal"],
-                "confidence": "high",
-            },
-        },
-        {
-            "name": "Budget Rishikesh backpacking trip",
-            "user_query": "I want yoga, rafting, cafes and a budget backpacking trip",
-            "destination_result": {
-                "agent_name": "Destination Agent",
-                "status": "success",
-                "recommended_destination": "Rishikesh",
-                "reason": "Rishikesh matches yoga, rafting, cafes and backpacking travel.",
-                "suitable_for": ["backpackers", "adventure lovers", "spiritual travelers"],
-                "suggested_duration": "3 to 4 days",
-                "best_time_to_visit": "September to November and March to May",
-                "key_attractions": ["Laxman Jhula", "Ganga Ghat", "River Rafting"],
-                "confidence": "high",
-            },
-        },
-        {
-            "name": "Destination Agent failed",
-            "user_query": "I want to visit Venice and stay near canals",
-            "destination_result": {
-                "agent_name": "Destination Agent",
-                "status": "out_of_knowledge_base",
-                "recommended_destination": None,
-                "reason": "Venice is not available in the current VoyageAI knowledge base.",
-                "suitable_for": [],
-                "suggested_duration": None,
-                "best_time_to_visit": None,
-                "key_attractions": [],
-                "confidence": "low",
-            },
-        },
-        {
-            "name": "No destination returned",
-            "user_query": "I want a peaceful trip but I am not sure where to go",
-            "destination_result": {
-                "agent_name": "Destination Agent",
-                "status": "success",
-                "recommended_destination": None,
-                "reason": "No suitable destination was found.",
-                "suitable_for": [],
-                "suggested_duration": None,
-                "best_time_to_visit": None,
-                "key_attractions": [],
-                "confidence": "low",
-            },
-        },
-        {
-            "name": "Destination not in KB",
-            "user_query": "I want luxury hotels in Switzerland",
-            "destination_result": {
-                "agent_name": "Destination Agent",
-                "status": "success",
-                "recommended_destination": "Switzerland",
-                "reason": "Switzerland matches luxury mountain travel.",
-                "suitable_for": ["luxury travelers", "nature lovers"],
-                "suggested_duration": "5 to 7 days",
-                "best_time_to_visit": "April to October",
-                "key_attractions": ["Swiss Alps", "Lucerne", "Interlaken"],
-                "confidence": "medium",
-            },
-        },
-    ]
-
-    hotel_agent = HotelAgent()
-
-    for test_case in test_cases:
-        print("=" * 100)
-        print("Test Case:", test_case["name"])
-        print("User Query:", test_case["user_query"])
-        print("-" * 100)
-
-        result = hotel_agent.run(
-            user_query=test_case["user_query"],
-            destination_result=test_case["destination_result"],
+        destination = destination_result.get(
+            "recommended_destination"
         )
 
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        print()
+        if not destination:
+
+            return {
+                "agent_name": "Hotel Agent",
+                "status": "failed",
+                "error": "Destination missing."
+            }
+
+        coordinates = destination_result.get(
+            "coordinates",
+            {}
+        )
+
+        latitude = coordinates.get("latitude")
+        longitude = coordinates.get("longitude")
+
+        if latitude is None or longitude is None:
+
+            return {
+                "agent_name": "Hotel Agent",
+                "status": "failed",
+                "error": "Destination coordinates missing."
+            }
+
+        # -----------------------------------------
+        # Fetch Hotels
+        # -----------------------------------------
+
+        hotels = search_hotels(
+            latitude=latitude,
+            longitude=longitude,
+            radius=50000,
+            limit=50
+        )
+
+        if not hotels:
+
+            return {
+                "agent_name": "Hotel Agent",
+                "status": "failed",
+                "error": "No hotels found."
+            }
+
+        # -----------------------------------------
+        # User Profiling
+        # -----------------------------------------
+
+        budget_level = detect_budget_level(
+            user_query
+        )
+
+        traveler_type = detect_traveler_type(
+            user_query
+        )
+
+        preferences = detect_preferences(
+            user_query
+        )
+
+        # -----------------------------------------
+        # LLM Ranking
+        # -----------------------------------------
+
+        ranking = rank_hotels(
+            user_query=user_query,
+            destination=destination,
+            hotels=hotels,
+            budget_level=budget_level,
+            traveler_type=traveler_type,
+            preferences=preferences
+        )
+
+        print("\n===== HOTEL RANKING OUTPUT =====")
+        print(
+            json.dumps(
+                ranking,
+                indent=2,
+                ensure_ascii=False
+            )
+        )
+
+        # -----------------------------------------
+        # Build Top Recommendations
+        # -----------------------------------------
+
+        top_recommended_hotels = []
+
+        for recommendation in ranking.get(
+            "top_recommended_hotels",
+            []
+        ):
+
+            hotel_name = safe_str(
+                recommendation.get(
+                    "hotel_name"
+                )
+            )
+
+            if not hotel_name:
+                continue
+
+            matched_hotel = None
+
+            for hotel in hotels:
+
+                hotel_api_name = safe_lower(
+                    hotel.get("name")
+                )
+
+                llm_hotel_name = safe_lower(
+                    hotel_name
+                )
+
+                if hotel_api_name == llm_hotel_name:
+
+                    matched_hotel = hotel.copy()
+
+                    matched_hotel[
+                        "selection_reason"
+                    ] = safe_str(
+                        recommendation.get(
+                            "reason"
+                        )
+                    )
+
+                    break
+
+            if matched_hotel:
+
+                top_recommended_hotels.append(
+                    matched_hotel
+                )
+
+        # -----------------------------------------
+        # Fallback
+        # -----------------------------------------
+
+        if len(
+            top_recommended_hotels
+        ) == 0:
+
+            for hotel in hotels[:3]:
+
+                hotel_copy = hotel.copy()
+
+                hotel_copy[
+                    "selection_reason"
+                ] = (
+                    "Recommended based on "
+                    "overall relevance."
+                )
+
+                top_recommended_hotels.append(
+                    hotel_copy
+                )
+
+        # -----------------------------------------
+        # Alternative Hotels
+        # -----------------------------------------
+
+        alternative_hotels = []
+
+        for hotel_name in ranking.get(
+            "alternative_hotels",
+            []
+        ):
+
+            hotel_name = safe_str(
+                hotel_name
+            )
+
+            if not hotel_name:
+                continue
+
+            matched_hotel = None
+
+            for hotel in hotels:
+
+                if (
+                    safe_lower(
+                        hotel.get("name")
+                    )
+                    ==
+                    safe_lower(
+                        hotel_name
+                    )
+                ):
+
+                    matched_hotel = hotel.copy()
+                    break
+
+            if matched_hotel:
+
+                alternative_hotels.append(
+                    matched_hotel
+                )
+
+        # -----------------------------------------
+        # Alternative Fallback
+        # -----------------------------------------
+
+        if len(
+            alternative_hotels
+        ) == 0:
+
+            alternative_hotels = hotels[3:8]
+
+        # -----------------------------------------
+        # Final Response
+        # -----------------------------------------
+
+        return {
+
+            "agent_name":
+                "Hotel Agent",
+
+            "status":
+                "success",
+
+            "destination":
+                destination,
+
+            "budget_preference":
+                budget_level,
+
+            "traveler_type":
+                traveler_type,
+
+            "preferences":
+                preferences,
+
+            "recommended_area":
+                ranking.get(
+                    "recommended_area",
+                    destination
+                ),
+
+            "top_recommended_hotels":
+                top_recommended_hotels,
+
+            "alternative_hotels":
+                alternative_hotels,
+
+            "hotels_considered":
+                len(hotels),
+
+            "confidence":
+                "high"
+        }
+
+    except Exception as e:
+
+        import traceback
+
+        print(
+            "\n===== HOTEL AGENT ERROR ====="
+        )
+
+        traceback.print_exc()
+
+        return {
+
+            "agent_name":
+                "Hotel Agent",
+
+            "status":
+                "failed",
+
+            "error":
+                str(e)
+        }
+
+
+# =====================================================
+# Local Testing
+# =====================================================
+
+if __name__ == "__main__":
+
+    destination_result = {
+        "recommended_destination": "Goa",
+        "coordinates": {
+            "latitude": 15.2993,
+            "longitude": 74.1240
+        }
+    }
+
+    result = run_hotel_agent(
+        user_query="""
+        I want a low budget Goa trip
+        with beaches, seafood
+        and nightlife.
+        """,
+        destination_result=destination_result
+    )
+
+    print(
+        json.dumps(
+            result,
+            indent=2,
+            ensure_ascii=False
+        )
+    )

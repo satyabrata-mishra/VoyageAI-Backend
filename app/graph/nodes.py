@@ -5,10 +5,12 @@ from app.agents.transport_agent import run_transport_agent
 from app.agents.weather_agent import run_weather_agent
 from app.agents.budget_agent import run_budget_agent
 from app.agents.itinerary_agent import run_itinerary_agent
+from app.agents.attraction_agent import run_attraction_agent
 
 
 AGENT_ORDER = [
     "Destination Agent",
+    "Attraction Agent",
     "Hotel Agent",
     "Food Agent",
     "Transport Agent",
@@ -21,6 +23,7 @@ AGENT_ORDER = [
 def get_default_agent_status():
     return {
         "Destination Agent": "waiting",
+        "Attraction Agent": "waiting",
         "Hotel Agent": "waiting",
         "Food Agent": "waiting",
         "Transport Agent": "waiting",
@@ -94,6 +97,56 @@ def destination_node(state):
             **status_update
         }
 
+def attraction_node(state):
+    agent_name = "Attraction Agent"
+
+    try:
+        result = run_attraction_agent(
+            user_query=state["user_query"],
+            destination_result=state["destination_result"]
+        )
+
+        status_update = mark_agent_completed(
+            state,
+            agent_name
+        )
+
+        return {
+            "attraction_result": result,
+            "errors": state.get("errors", []),
+            **status_update
+        }
+
+    except Exception as e:
+
+        errors = state.get("errors", [])
+        errors.append(
+            f"{agent_name} failed: {str(e)}"
+        )
+
+        status_update = mark_agent_error(
+            state,
+            agent_name
+        )
+
+        return {
+            "attraction_result": {
+                "agent_name": agent_name,
+                "status": "error",
+                "destination": state.get(
+                    "destination_result",
+                    {}
+                ).get(
+                    "recommended_destination"
+                ),
+                "top_attractions": [],
+                "alternative_attractions": [],
+                "reason": str(e),
+                "confidence": "low"
+            },
+            "errors": errors,
+            **status_update
+        }
 
 def hotel_node(state):
     agent_name = "Hotel Agent"

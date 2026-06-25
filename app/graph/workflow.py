@@ -1,8 +1,10 @@
+from langgraph import graph
 from langgraph.graph import StateGraph, START, END
 
 from app.graph.state import VoyageAIState
 from app.graph.nodes import (
     destination_node,
+    attraction_node,
     hotel_node,
     food_node,
     transport_node,
@@ -21,6 +23,7 @@ def build_travel_graph():
     graph = StateGraph(VoyageAIState)
 
     graph.add_node("destination", destination_node)
+    graph.add_node("attraction",attraction_node)
     graph.add_node("hotel", hotel_node)
     graph.add_node("food", food_node)
     graph.add_node("transport", transport_node)
@@ -30,17 +33,16 @@ def build_travel_graph():
     graph.add_node("itinerary", itinerary_node)
 
     graph.add_edge(START, "destination")
-
     graph.add_conditional_edges(
         "destination",
         route_after_destination,
         {
-            "hotel": "hotel",
+            "attraction": "attraction",
             "end": END
         }
     )
-
-    graph.add_edge("hotel", "food")
+    graph.add_edge("attraction","hotel")
+    graph.add_edge("hotel","food")
     graph.add_edge("food", "transport")
     graph.add_edge("transport", "weather")
     graph.add_edge("weather", "budget")

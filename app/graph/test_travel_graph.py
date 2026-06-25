@@ -36,6 +36,9 @@ def run_test():
 
     # print("\nDestination Result:")
     # print(json.dumps(final_state.get("destination_result"), indent=2))
+    
+    # print("\nAttraction Result:")
+    # print(json.dumps(final_state.get("attraction_result"), indent=2))
 
     # print("\nHotel Result:")
     # print(json.dumps(final_state.get("hotel_result"), indent=2))
