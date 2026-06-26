@@ -6,6 +6,8 @@ dist/
 wheels/
 *.egg-info
 *.lock
+*.python-version
+*.toml
 
 # Virtual environments
 .venv
@@ -17,3 +19,4 @@ wheels/
 /data
 /chroma_db
 /UI
+/notebooks

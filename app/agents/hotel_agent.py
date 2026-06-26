@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 
 from app.tools.hotel_tool import search_hotels
+from app.tools.image_tool import enrich_hotel_images
 
 load_dotenv()
 
@@ -317,15 +318,6 @@ def run_hotel_agent(
             preferences=preferences
         )
 
-        print("\n===== HOTEL RANKING OUTPUT =====")
-        print(
-            json.dumps(
-                ranking,
-                indent=2,
-                ensure_ascii=False
-            )
-        )
-
         # -----------------------------------------
         # Build Top Recommendations
         # -----------------------------------------
@@ -378,6 +370,9 @@ def run_hotel_agent(
                     matched_hotel
                 )
 
+
+        for hotel in top_recommended_hotels:
+            hotel["image"] = enrich_hotel_images(hotel["name"])
         # -----------------------------------------
         # Fallback
         # -----------------------------------------
@@ -441,7 +436,8 @@ def run_hotel_agent(
                 alternative_hotels.append(
                     matched_hotel
                 )
-
+        for hotel in alternative_hotels:
+            hotel["image"] = enrich_hotel_images(hotel["name"])
         # -----------------------------------------
         # Alternative Fallback
         # -----------------------------------------

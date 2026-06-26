@@ -386,11 +386,11 @@ def itinerary_node(state):
         result = run_itinerary_agent(
             user_query=state["user_query"],
             destination_result=state.get("destination_result", {}),
+            attraction_result=state.get("attraction_result", {}),
             hotel_result=state.get("hotel_result", {}),
             food_result=state.get("food_result", {}),
             transport_result=state.get("transport_result", {}),
-            weather_result=state.get("weather_result", {}),
-            budget_result=state.get("budget_result", {})
+            weather_result=state.get("weather_result", {})
         )
 
         if result.get("status") == "skipped":

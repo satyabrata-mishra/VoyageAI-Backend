@@ -1,295 +1,257 @@
+import os
 import json
-from typing import Any
+import re
+import traceback
 
+from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 
-from app.config.settings import settings
-from app.rag.vector_store import get_vector_store
-from app.utils.destination_utils import (
-    get_available_destinations,
-    is_destination_in_kb,
-    normalize_destination_to_key,
+from app.tools.food_tool import (
+    search_restaurants,
+    enrich_restaurants
 )
-from app.utils.json_utils import parse_json_response
+
+from app.tools.image_tool import enrich_restaurant_images
+
+load_dotenv()
+
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0.2,
+    api_key=os.getenv("GROQ_API_KEY")
+)
 
 
-FOOD_AGENT_PROMPT = ChatPromptTemplate.from_template("""
-You are the Food Agent of VoyageAI.
+# =====================================================
+# Safe JSON Parser
+# =====================================================
 
-Your task is to suggest local food and cuisine experiences for the selected destination based on:
-1. User travel request
-2. Destination Agent output
-3. Retrieved travel knowledge
+def safe_json_parse(content: str):
 
-User Travel Request:
+    content = content.strip()
+
+    if "```json" in content:
+        content = (
+            content.replace("```json", "")
+            .replace("```", "")
+            .strip()
+        )
+
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+
+    if not match:
+        raise ValueError("No JSON found.")
+
+    return json.loads(match.group())
+
+
+# =====================================================
+# Extract Food Preference
+# =====================================================
+
+def extract_food_preference(user_query):
+
+    prompt = f"""
+You are a food preference extraction system.
+
+User Query:
 {user_query}
 
-Destination Agent Output:
-{destination_result}
+Identify the primary food preference.
 
-Retrieved Travel Knowledge:
-{context}
+Possible values:
 
-Return your answer strictly in valid JSON format.
+- seafood
+- vegetarian
+- vegan
+- street food
+- local cuisine
+- fine dining
+- cafe
+- desserts
+- budget
+- no preference
 
-JSON structure:
+Return ONLY one value.
+"""
+
+    response = llm.invoke(prompt)
+
+    preference = response.content.strip().lower()
+
+    return preference
+
+
+# =====================================================
+# Rank Restaurants
+# =====================================================
+
+def rank_restaurants(
+    user_query,
+    destination,
+    restaurants,
+    preference
+):
+
+    prompt = f"""
+You are an expert travel food planner.
+
+Destination:
+{destination}
+
+Food Preference:
+{preference}
+
+Nearby Restaurants:
+
+{json.dumps(restaurants[:15], indent=2)}
+
+Recommend the best restaurants.
+
+Respond ONLY in JSON.
+
+Schema:
+
 {{
-  "agent_name": "Food Agent",
-  "status": "success",
-  "destination": "destination name",
-  "food_preference_detected": "seafood/vegetarian/street_food/local_cuisine/cafe_food/unknown",
-  "recommended_foods": ["food 1", "food 2", "food 3", "food 4", "food 5"],
-  "food_experience": "short description of the overall food experience",
-  "best_for": ["food lover type 1", "food lover type 2"],
-  "food_tips": ["tip 1", "tip 2"],
-  "reason": "why these food recommendations match the user",
-  "confidence": "high/medium/low"
+    "recommended_restaurants":[
+        {{
+            "name":"",
+            "reason":""
+        }}
+    ],
+    "must_try_foods":[]
 }}
-
-Rules:
-- Use only the retrieved travel knowledge.
-- Do not invent restaurant names.
-- Do not invent food prices.
-- Do not recommend dishes outside the selected destination context.
-- If the user has no specific food preference, recommend the most important local foods from the context.
-- Do not add markdown.
-- Do not wrap JSON in ```json.
-""")
-
-
-class FoodAgent:
-    def __init__(self):
-        self.vector_store = get_vector_store()
-
-        self.available_destinations = get_available_destinations(
-            self.vector_store
-        )
-
-        if not settings.GROQ_API_KEY:
-            raise ValueError(
-                "GROQ_API_KEY not found. Please check your .env file."
-            )
-
-        self.llm = ChatGroq(
-            model=settings.GROQ_MODEL_NAME,
-            temperature=0.2,
-            groq_api_key=settings.GROQ_API_KEY,
-        )
-
-        self.chain = FOOD_AGENT_PROMPT | self.llm | StrOutputParser()
-
-    def get_food_context(
-        self,
-        user_query: str,
-        destination_result: dict[str, Any],
-        k: int = 4,
-    ) -> str:
-        destination = destination_result.get("recommended_destination")
-        city_key = normalize_destination_to_key(destination)
-
-        retrieval_query = f"""
-Destination: {destination}
-User request: {user_query}
-Need food recommendations, local dishes, cuisine, must-try food, food experience, eating tips.
 """
 
-        try:
-            docs = self.vector_store.similarity_search(
-                retrieval_query,
-                k=k,
-                filter={"city": city_key},
-            )
+    response = llm.invoke(prompt)
 
-            if not docs:
-                docs = self.vector_store.similarity_search(
-                    retrieval_query,
-                    k=k,
-                )
+    return safe_json_parse(response.content)
 
-        except Exception as error:
-            print("Filter search failed. Running normal similarity search.")
-            print("Error:", error)
 
-            docs = self.vector_store.similarity_search(
-                retrieval_query,
-                k=k,
-            )
-
-        context_parts = []
-
-        for index, doc in enumerate(docs, start=1):
-            city = doc.metadata.get("city")
-            source = doc.metadata.get("source")
-
-            context = f"""
-Context {index}
-City: {city}
-Source: {source}
-Content:
-{doc.page_content}
-"""
-            context_parts.append(context.strip())
-
-        return "\n\n".join(context_parts)
-
-    def run(
-        self,
-        user_query: str,
-        destination_result: dict[str, Any],
-        k: int = 4,
-    ) -> dict[str, Any]:
-        destination_status = destination_result.get("status")
-        destination = destination_result.get("recommended_destination")
-
-        if destination_status != "success":
-            return {
-                "agent_name": "Food Agent",
-                "status": "skipped",
-                "destination": None,
-                "message": (
-                    "Food Agent skipped because Destination Agent did not "
-                    "return a valid destination."
-                ),
-                "reason": destination_result.get("reason"),
-                "confidence": "low",
-            }
-
-        if not destination:
-            return {
-                "agent_name": "Food Agent",
-                "status": "no_destination_found",
-                "destination": None,
-                "message": (
-                    "Food Agent cannot run because no destination was provided."
-                ),
-                "confidence": "low",
-            }
-
-        if not is_destination_in_kb(
-            destination,
-            self.available_destinations,
-        ):
-            return {
-                "agent_name": "Food Agent",
-                "status": "out_of_knowledge_base",
-                "destination": destination,
-                "message": (
-                    f"{destination} is not available in the current "
-                    "VoyageAI knowledge base."
-                ),
-                "available_destinations": self.available_destinations,
-                "confidence": "low",
-            }
-
-        context = self.get_food_context(
-            user_query=user_query,
-            destination_result=destination_result,
-            k=k,
-        )
-
-        response = self.chain.invoke(
-            {
-                "user_query": user_query,
-                "destination_result": json.dumps(
-                    destination_result,
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                "context": context,
-            }
-        )
-
-        try:
-            parsed_response = parse_json_response(response)
-        except Exception:
-            return {
-                "agent_name": "Food Agent",
-                "status": "error",
-                "destination": destination,
-                "message": "Failed to parse Food Agent response.",
-                "confidence": "low",
-                "raw_response": response,
-            }
-
-        parsed_response["status"] = parsed_response.get("status", "success")
-
-        return parsed_response
-
+# =====================================================
+# Main Food Agent
+# =====================================================
 
 def run_food_agent(
-    user_query: str,
-    destination_result: dict[str, Any],
-    k: int = 4,
-) -> dict[str, Any]:
-    agent = FoodAgent()
+    user_query,
+    destination_result
+):
 
-    return agent.run(
-        user_query=user_query,
-        destination_result=destination_result,
-        k=k,
-    )
+    try:
 
-if __name__ == "__main__":
-    test_cases = [
-        {
-            "user_query": "I want beaches, seafood, nightlife and a relaxed vacation",
-            "destination_result": {
-                "agent_name": "Destination Agent",
-                "status": "success",
-                "recommended_destination": "Goa",
-                "reason": "Goa matches beaches, seafood, nightlife and relaxed coastal travel.",
-                "suitable_for": [
-                    "beach lovers",
-                    "food lovers",
-                    "nightlife travelers",
-                ],
-                "suggested_duration": "3 to 5 days",
-                "best_time_to_visit": "November to February",
-                "confidence": "high",
-            },
-        },
-        {
-            "user_query": "I want forts, palaces, royal culture and traditional food",
-            "destination_result": {
-                "agent_name": "Destination Agent",
-                "status": "success",
-                "recommended_destination": "Jaipur",
-                "reason": "Jaipur matches forts, palaces, culture and traditional food.",
-                "suitable_for": [
-                    "history lovers",
-                    "culture lovers",
-                    "families",
-                ],
-                "suggested_duration": "2 to 4 days",
-                "best_time_to_visit": "October to March",
-                "confidence": "high",
-            },
-        },
-        {
-            "user_query": "I want to go to Venice and try Italian food",
-            "destination_result": {
-                "agent_name": "Destination Agent",
-                "status": "out_of_knowledge_base",
-                "recommended_destination": None,
-                "reason": "Venice is not available in the current VoyageAI knowledge base.",
-                "confidence": "low",
-            },
-        },
-    ]
-
-    food_agent = FoodAgent()
-
-    for test_case in test_cases:
-        print("=" * 100)
-        print("User Query:", test_case["user_query"])
-        print("-" * 100)
-
-        result = food_agent.run(
-            user_query=test_case["user_query"],
-            destination_result=test_case["destination_result"],
+        destination = destination_result.get(
+            "recommended_destination"
         )
 
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        print()
+        coordinates = destination_result.get(
+            "coordinates",
+            {}
+        )
+
+        latitude = coordinates.get("latitude")
+        longitude = coordinates.get("longitude")
+
+        if latitude is None or longitude is None:
+
+            return {
+                "agent_name": "Food Agent",
+                "status": "failed",
+                "error": "Destination coordinates not found."
+            }
+
+        food_preference = extract_food_preference(
+            user_query
+        )
+
+        restaurants = search_restaurants(
+            latitude=latitude,
+            longitude=longitude,
+            radius=5000,
+            limit=30
+        )
+
+        restaurants = enrich_restaurants(
+            restaurants,
+            max_results=15
+        )
+
+        ranking = rank_restaurants(
+            user_query=user_query,
+            destination=destination,
+            restaurants=restaurants,
+            preference=food_preference
+        )
+
+        for restaurant in ranking.get("recommended_restaurants", []):
+            restaurant["image"] = enrich_restaurant_images(restaurant["name"])
+        
+        return {
+
+            "agent_name": "Food Agent",
+
+            "status": "success",
+
+            "destination": destination,
+
+            "food_preference_detected":
+                food_preference,
+
+            "recommended_restaurants":
+                ranking.get(
+                    "recommended_restaurants",
+                    []
+                ),
+
+            "must_try_foods":
+                ranking.get(
+                    "must_try_foods",
+                    []
+                ),
+
+            "restaurants_considered":
+                len(restaurants),
+
+            "confidence": "high"
+        }
+
+    except Exception as e:
+
+        traceback.print_exc()
+
+        return {
+
+            "agent_name": "Food Agent",
+
+            "status": "failed",
+
+            "error": str(e)
+        }
+
+
+# =====================================================
+# Local Testing
+# =====================================================
+
+if __name__ == "__main__":
+
+    destination_result = {
+
+        "recommended_destination": "Goa",
+
+        "coordinates": {
+            "latitude": 15.2993,
+            "longitude": 74.1240
+        }
+    }
+
+    result = run_food_agent(
+
+        user_query=(
+            "I want a Goa trip with seafood, beaches "
+            "and nightlife."
+        ),
+
+        destination_result=destination_result
+    )
+
+    print(json.dumps(result, indent=2))

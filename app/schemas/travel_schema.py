@@ -21,5 +21,4 @@ class TravelPlanResponse(BaseModel):
     revision_count: int = 0
     revision_notes: list = []
     agent_outputs: dict = {}
-    final_itinerary: dict = {}
     errors: list = []

@@ -9,6 +9,8 @@ from app.tools.attraction_tool import (
     enrich_attractions
 )
 
+from app.tools.image_tool import enrich_attraction_images
+
 load_dotenv()
 
 llm = ChatGroq(
@@ -82,14 +84,7 @@ def find_attraction_by_name(
 
     for attraction in attractions:
 
-        if (
-            attraction.get(
-                "name",
-                ""
-            ).lower()
-            ==
-            attraction_name.lower()
-        ):
+        if (attraction.get("name","").lower()==attraction_name.lower()):
             return attraction
 
     return None
@@ -148,6 +143,9 @@ def run_attraction_agent(
         attractions = enrich_attractions(
             attractions
         )
+        for attraction in attractions:
+            if(attraction.get("name")):
+                attraction["image"] = enrich_attraction_images(attraction["name"])
 
         # ------------------------------------
         # Rank Attractions

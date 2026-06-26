@@ -11,9 +11,8 @@ from app.tools.destination_tool import (
     get_top_attractions
 )
 
-# Existing RAG utilities
-from app.rag.retriever import get_retrieval_context
-from app.rag.rag_chain import rag_chain
+from app.tools.image_tool import enrich_destination_images
+
 
 load_dotenv()
 
@@ -223,6 +222,8 @@ def run_destination_agent(user_query):
 
                 "recommended_destination":
                     destination_data["name"],
+                
+                "hero_image": enrich_destination_images(destination_data["name"]),
 
                 "country":
                     destination_data["country"],
@@ -234,64 +235,21 @@ def run_destination_agent(user_query):
                         destination_data["longitude"]
                 },
 
-                "key_attractions": [
-                    attraction["name"]
-                    for attraction in attractions[:5]
-                ],
-
                 **analysis,
 
                 "confidence": "high"
             }
 
-        # -------------------------------------------------
-        # CASE B
-        # No destination mentioned
-        # Use existing RAG workflow
-        # -------------------------------------------------
+       
 
-        context = get_retrieval_context(
-            query=user_query,
-            k=3
-        )
-
-        rag_response = rag_chain.invoke(
-            {
-                "user_query": user_query,
-                "context": context
-            }
-        )
-
-        # -------------------------------------------------
-        # Extract destination from RAG output
-        # -------------------------------------------------
-
-        extraction_prompt = f"""
-Extract ONLY the recommended destination.
-
-Response:
-
-{rag_response}
-
-Return only destination name.
-"""
-
-        destination_name = (
-            llm.invoke(extraction_prompt)
-            .content
-            .strip()
-        )
-
-        enriched = enrich_destination(
-            destination_name
-        )
+        
 
         if not enriched:
 
             return {
                 "agent_name": "Destination Agent",
                 "status": "failed",
-                "error": f"Could not enrich destination: {destination_name}"
+                "error": f"Could not enrich destination: {destination_data['name']}"
             }
 
         destination_data = enriched["destination_data"]
@@ -319,11 +277,6 @@ Return only destination name.
                 "longitude":
                     destination_data["longitude"]
             },
-
-            "key_attractions": [
-                attraction["name"]
-                for attraction in attractions[:10]
-            ],
 
             **analysis,
 

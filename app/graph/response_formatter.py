@@ -35,6 +35,5 @@ def format_graph_response(final_state: dict):
             "budget": budget_result,
             "itinerary": itinerary_result
         },
-        "final_itinerary": itinerary_result,
         "errors": errors
     }
