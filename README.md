@@ -47,10 +47,9 @@ Each agent specializes in a specific planning task and exchanges structured info
 - LangGraph
 - LangChain
 - Groq LLM
+- RAG
 
 ### Databases
-- MongoDB
-- PostgreSQL
 - ChromaDB
 
 ### External APIs
@@ -82,7 +81,7 @@ app/
 Clone the repository
 
 ```bash
-git clone https://github.com/<your-username>/VoyageAI-Backend.git
+git clone https://github.com/satyabrata-mishra/VoyageAI-Backend.git
 ```
 
 Move into the project
