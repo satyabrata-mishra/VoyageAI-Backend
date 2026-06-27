@@ -15,6 +15,7 @@ app = FastAPI(
 _default_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "https://voyageai0.netlify.app"
 ]
 _extra_origins = os.getenv("CORS_ORIGINS", "")
 _cors_origins = _default_origins + [o.strip() for o in _extra_origins.split(",") if o.strip()]
